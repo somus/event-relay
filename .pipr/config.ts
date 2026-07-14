@@ -1,4 +1,25 @@
 import { definePipr } from "@usepipr/sdk";
+import type { DiffManifest, ReviewFinding } from "@usepipr/sdk";
+
+type SecuritySummary = {
+  headline: string;
+  riskSummary: string;
+  reviewerFocus: string[];
+};
+
+type SecurityRisk = {
+  title: string;
+  category: "auth" | "injection" | "secret" | "crypto" | "data-exposure" | "other";
+  severity: "low" | "medium" | "high" | "critical";
+  rationale: string;
+  finding: ReviewFinding;
+};
+
+type SecurityReview = {
+  summary: SecuritySummary;
+  risks: SecurityRisk[];
+  diagramMermaid?: string;
+};
 
 export default definePipr((pipr) => {
   const model = pipr.model({
@@ -8,47 +29,289 @@ export default definePipr((pipr) => {
     options: { thinking: "high" },
   });
 
-  pipr.config({ publication: { maxInlineComments: 5 } });
+  const securityOutput = pipr.jsonSchema<SecurityReview>({
+    id: "security/sast-review",
+    schema: {
+      type: "object",
+      additionalProperties: false,
+      required: ["summary", "risks"],
+      properties: {
+        summary: {
+          type: "object",
+          additionalProperties: false,
+          required: ["headline", "riskSummary", "reviewerFocus"],
+          properties: {
+            headline: { type: "string" },
+            riskSummary: { type: "string" },
+            reviewerFocus: {
+              type: "array",
+              items: { type: "string" },
+            },
+          },
+        },
+        risks: {
+          type: "array",
+          items: {
+            type: "object",
+            additionalProperties: false,
+            required: ["title", "category", "severity", "rationale", "finding"],
+            properties: {
+              title: { type: "string" },
+              category: {
+                type: "string",
+                enum: ["auth", "injection", "secret", "crypto", "data-exposure", "other"],
+              },
+              severity: { type: "string", enum: ["low", "medium", "high", "critical"] },
+              rationale: { type: "string" },
+              finding: {
+                type: "object",
+                additionalProperties: false,
+                required: ["body", "path", "rangeId", "side", "startLine", "endLine"],
+                properties: {
+                  body: { type: "string" },
+                  path: { type: "string" },
+                  rangeId: { type: "string" },
+                  side: { type: "string", enum: ["RIGHT", "LEFT"] },
+                  startLine: { type: "number" },
+                  endLine: { type: "number" },
+                  suggestedFix: { type: "string" },
+                },
+              },
+            },
+          },
+        },
+        diagramMermaid: { type: "string" },
+      },
+    },
+  });
 
-  pipr.review({
-    id: "review",
+  const security = pipr.agent({
+    name: "security-sast",
     model,
     instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
+      Review for exploitable security issues only. Focus on auth bypasses,
+      injection, unsafe deserialization, secret exposure, cryptography misuse,
+      authorization gaps, and data exposure. Require a changed trust boundary or
+      source-to-sink path and anchor every risk to the exact changed range that
+      creates or weakens it. Do not report hypothetical or style-only issues.
+      Make summary maintainer-facing and scannable with a concrete headline,
+      risk rationale, and only useful security follow-up. Set
+      diagramMermaid only when a high or critical risk has a concrete source-to-sink
+      path and a small Mermaid flowchart clarifies it. Do not include Markdown
+      fences in diagramMermaid.
     `,
-    timeout: "10m",
-    comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+    output: securityOutput,
+    tools: pipr.tools.readOnly,
+    retry: { invalidOutput: 1, transientFailure: 1 },
+    prompt: () => pipr.prompt`
+      ${pipr.section("Security review policy", "Return only risks with a concrete attack path.")}
+    `,
+  });
 
-      return {
+  const task = pipr.task({
+    name: "security-sast",
+    check: { enabled: true, name: "security-sast", required: true },
+    async run(ctx) {
+      const manifest = await ctx.change.diffManifest({ compressed: true });
+      const result = await ctx.pi.run(security, { manifest });
+      const risks = commentableSecurityRisks(result.risks, manifest);
+      const droppedRiskCount = result.risks.length - risks.length;
+      const inlineFindings: ReviewFinding[] = risks.map((risk) => risk.finding);
+      const hasHighOrCriticalRisk = risks.some(isHighOrCriticalRisk);
+      if (hasHighOrCriticalRisk) {
+        ctx.check.fail("High or critical security risk found.");
+      } else {
+        ctx.check.pass("No high or critical security risks found.");
+      }
+      await ctx.comment({
         main: [
           "## Summary",
           "",
-          result.summary.body,
+          `**${result.summary.headline}**`,
           "",
-          "## Review Result",
+          securityStatusTable(risks),
           "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
+          result.summary.riskSummary,
           "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
+          "## Reviewer Focus",
+          "",
+          bulletList(result.summary.reviewerFocus, "No special security follow-up."),
+          "",
+          "## Security Risks",
+          "",
+          securityRisksTable(risks),
+          ...(droppedRiskCount > 0 ? ["", omittedRisksNote(droppedRiskCount)] : []),
+          ...(risks.length > 0 ? ["", riskRationalesBlock(risks)] : []),
+          ...(hasHighOrCriticalRisk && result.diagramMermaid?.trim()
+            ? ["", attackPathDiagramBlock(result.diagramMermaid, hasHighOrCriticalRisk)]
+            : []),
         ].join("\n"),
-        inlineFindings: result.inlineFindings,
-      };
+        inlineFindings,
+      });
     },
   });
+
+  pipr.on.changeRequest({ actions: ["opened", "updated", "reopened", "ready"], task });
+  pipr.command({ pattern: "@pipr security", permission: "write", task });
 });
+
+function commentableSecurityRisks(
+  risks: SecurityRisk[],
+  manifest: DiffManifest,
+): SecurityRisk[] {
+  const risksByLocation = new Map<string, SecurityRisk>();
+  for (const risk of risks) {
+    const finding = risk.finding;
+    const validAnchor = manifest.files.some((file) =>
+      file.commentableRanges.some(
+        (range) =>
+          finding.rangeId === range.id &&
+          finding.path === range.path &&
+          finding.side === range.side &&
+          finding.startLine <= finding.endLine &&
+          finding.startLine >= range.startLine &&
+          finding.endLine <= range.endLine,
+      ),
+    );
+    const key = [
+      finding.path,
+      finding.rangeId,
+      finding.side,
+      finding.startLine,
+      finding.endLine,
+      finding.body,
+    ].join("\n");
+    if (!validAnchor) {
+      continue;
+    }
+    const existing = risksByLocation.get(key);
+    if (!existing || securitySeverityRank(risk.severity) > securitySeverityRank(existing.severity)) {
+      risksByLocation.set(key, risk);
+    }
+  }
+  return [...risksByLocation.values()];
+}
+
+function omittedRisksNote(count: number): string {
+  const noun = count === 1 ? "risk" : "risks";
+  return `Omitted ${count} ${noun} with an invalid or duplicate anchor.`;
+}
+
+function securityStatusTable(risks: SecurityRisk[]): string {
+  return [
+    "| Status | Max severity | Risks |",
+    "| --- | --- | ---: |",
+    `| ${risks.some(isHighOrCriticalRisk) ? "Fail" : "Pass"} | ${maxSeverity(
+      risks,
+    )} | ${risks.length} |`,
+  ].join("\n");
+}
+
+function securityRisksTable(risks: SecurityRisk[]): string {
+  if (risks.length === 0) {
+    return [
+      "| Severity | Category | Title |",
+      "| --- | --- | --- |",
+      "| - | - | No security risks found. |",
+    ].join("\n");
+  }
+  return [
+    "| Severity | Category | Title |",
+    "| --- | --- | --- |",
+    ...risks.map(
+      (risk) =>
+        `| ${labelValue(risk.severity)} | ${tableCell(risk.category)} | ${tableCell(risk.title)} |`,
+    ),
+  ].join("\n");
+}
+
+function riskRationalesBlock(risks: SecurityRisk[]): string {
+  if (risks.length === 0) {
+    return "";
+  }
+  return [
+    "<details>",
+    "<summary>Risk rationales</summary>",
+    "",
+    risks
+      .map((risk, index) =>
+        [
+          `### ${index + 1}. ${risk.title}`,
+          "",
+          `**Severity:** ${labelValue(risk.severity)}`,
+          `**Category:** ${labelValue(risk.category)}`,
+          "",
+          risk.rationale,
+        ].join("\n"),
+      )
+      .join("\n\n"),
+    "",
+    "</details>",
+  ].join("\n");
+}
+
+function attackPathDiagramBlock(
+  diagramMermaid: string | undefined,
+  hasConcreteHighOrCriticalRisk: boolean,
+): string {
+  const diagram = diagramMermaid?.trim();
+  if (!diagram || !hasConcreteHighOrCriticalRisk) {
+    return "";
+  }
+  const fence = markdownFenceFor(diagram);
+  return [
+    "<details>",
+    "<summary>Attack path diagram</summary>",
+    "",
+    `${fence}mermaid`,
+    diagram,
+    fence,
+    "",
+    "</details>",
+  ].join("\n");
+}
+
+function maxSeverity(risks: SecurityRisk[]): string {
+  const severity = risks.reduce<SecurityRisk["severity"] | undefined>((current, risk) => {
+    if (!current || securitySeverityRank(risk.severity) > securitySeverityRank(current)) {
+      return risk.severity;
+    }
+    return current;
+  }, undefined);
+  return severity ? labelValue(severity) : "None";
+}
+
+function securitySeverityRank(severity: SecurityRisk["severity"]): number {
+  return ["low", "medium", "high", "critical"].indexOf(severity);
+}
+
+function isHighOrCriticalRisk(risk: SecurityRisk): boolean {
+  return risk.severity === "high" || risk.severity === "critical";
+}
+
+function bulletList(items: string[], emptyText: string): string {
+  if (items.length === 0) {
+    return emptyText;
+  }
+  return items.map((item) => `- ${lineText(item)}`).join("\n");
+}
+
+function labelValue(value: string): string {
+  return value.replaceAll("-", " ").replace(/^./, (char) => char.toUpperCase());
+}
+
+function lineText(value: string): string {
+  return value.replaceAll("\n", " ").trim();
+}
+
+function tableCell(value: string): string {
+  return lineText(value).replaceAll("|", "\\|");
+}
+
+function markdownFenceFor(value: string): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...[...value.matchAll(/`+/g)].map((match) => match[0].length),
+  );
+  return "`".repeat(Math.max(3, longestBacktickRun + 1));
+}
