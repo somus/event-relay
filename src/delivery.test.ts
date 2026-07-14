@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   deliverWebhook,
+  HttpDeliveryError,
   type DeliveryLedger,
   type WebhookClient,
 } from "./delivery";
@@ -51,5 +52,31 @@ describe("deliverWebhook", () => {
         ledger,
       ),
     ).resolves.toBe("already-delivered");
+  });
+
+  test("retries a transient provider failure", async () => {
+    let attempts = 0;
+    const client: WebhookClient = {
+      post: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new HttpDeliveryError("provider unavailable", 503);
+        }
+      },
+    };
+    const ledger: DeliveryLedger = {
+      hasCompleted: async () => false,
+      markCompleted: async () => undefined,
+    };
+
+    await expect(
+      deliverWebhook(
+        { id: "evt_retry", destination: "https://hooks.example.test/orders", body: "order.paid" },
+        client,
+        ledger,
+        { retries: 2, minTimeout: 0 },
+      ),
+    ).resolves.toBe("delivered");
+    expect(attempts).toBe(2);
   });
 });
