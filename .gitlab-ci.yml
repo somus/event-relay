@@ -1,0 +1,11 @@
+pipr:
+  image:
+    name: ghcr.io/somus/pipr:v0.4.0
+    entrypoint: [""]
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+  variables:
+    GIT_DEPTH: "0"
+    PIPR_CODE_HOST: "gitlab"
+  script:
+    - pipr host-run --host gitlab --config-dir .pipr
