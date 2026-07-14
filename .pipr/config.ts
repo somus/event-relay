@@ -1,54 +1,54 @@
-import { definePipr } from "@usepipr/sdk";
+import { definePipr, z } from "@usepipr/sdk";
 
 export default definePipr((pipr) => {
   const model = pipr.model({
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    options: { thinking: "medium" },
   });
 
-  pipr.config({ publication: { maxInlineComments: 5 } });
+  const changelogOutput = pipr.schema({
+    id: "release/changelog-draft",
+    schema: z.strictObject({
+      category: z.enum(["added", "changed", "fixed", "removed", "security", "internal"]),
+      entry: z.string(),
+      rationale: z.string(),
+    }),
+  });
 
-  pipr.review({
-    id: "review",
+  const changelog = pipr.agent({
+    name: "changelog-draft",
     model,
     instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
+      Draft one concise, release-facing changelog entry grounded in changed
+      behavior and change request intent. Use category "internal" when there is no
+      user-visible effect. Mention breaking behavior only when the repository
+      evidence proves it. Do not invent issue IDs, versions, release claims, or
+      behavior not supported by the change. Do not edit files.
     `,
-    timeout: "10m",
-    comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+    output: changelogOutput,
+    prompt: () => "Draft the changelog entry for this change.",
+  });
 
-      return {
-        main: [
-          "## Summary",
+  const task = pipr.task({
+    name: "changelog-draft",
+    async run(ctx) {
+      const manifest = await ctx.change.diffManifest({ compressed: true });
+      const result = await ctx.pi.run(changelog, { manifest });
+      await ctx.comment(
+        [
+          `**Category:** ${result.category}`,
           "",
-          result.summary.body,
+          result.entry,
           "",
-          "## Review Result",
-          "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
-          "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
+          "## Rationale",
+          result.rationale,
         ].join("\n"),
-        inlineFindings: result.inlineFindings,
-      };
+      );
     },
   });
+
+  pipr.on.changeRequest({ actions: ["opened", "updated"], task });
+  pipr.command({ pattern: "@pipr changelog", permission: "write", task });
 });
