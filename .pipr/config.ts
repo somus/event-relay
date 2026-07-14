@@ -1,54 +1,188 @@
-import { definePipr } from "@usepipr/sdk";
+import { definePipr, z } from "@usepipr/sdk";
 
 export default definePipr((pipr) => {
   const model = pipr.model({
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    options: { thinking: "medium" },
   });
 
-  pipr.config({ publication: { maxInlineComments: 5 } });
+  pipr.config({ publication: { maxInlineComments: 0 } });
 
-  pipr.review({
-    id: "review",
+  const briefingSchema = z.strictObject({
+    summary: z.string(),
+    prType: z.enum(["feature", "bugfix", "refactor", "docs", "tests", "dependency", "infra", "mixed"]),
+    riskLevel: z.enum(["low", "medium", "high"]),
+    riskSummary: z.string(),
+    changeMap: z.array(z.strictObject({
+      area: z.string(),
+      files: z.array(z.string()).max(4),
+      change: z.string(),
+    })).max(6),
+    reviewerFocus: z.array(z.string()).max(4),
+    notableFiles: z.array(z.strictObject({
+      path: z.string(),
+      reason: z.string(),
+    })).max(6),
+    walkthrough: z.array(z.string()).max(6),
+    diagramMermaid: z.string().optional(),
+  });
+
+  type Briefing = z.infer<typeof briefingSchema>;
+
+  const briefingOutput = pipr.schema({
+    id: "briefing/pr-reviewer",
+    schema: briefingSchema,
+  });
+
+  const briefing = pipr.agent({
+    name: "pr-briefing",
     model,
     instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
+      Produce a maintainer briefing instead of a defect hunt. Summarize what changed,
+      classify the PR type, explain review risk, list notable files, and include
+      a concise reviewer walkthrough. Use reviewerFocus for what humans should
+      inspect first. Use diagramMermaid only when a small flowchart clarifies
+      multi-step control flow, data flow, or package boundaries; omit it for
+      straightforward changes. Ground every file and claim in the Diff Manifest
+      and change metadata. Walkthrough items must explain behavior flow rather
+      than repeat file lists. Return empty arrays for list sections with no useful content;
+      the renderer omits those empty sections. Do not report inline findings.
     `,
-    timeout: "10m",
-    comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+    output: briefingOutput,
+    tools: pipr.tools.readOnly,
+    retry: { invalidOutput: 1, transientFailure: 1 },
+    timeout: "7m",
+    prompt: () => "Prepare a maintainer briefing for this change request.",
+  });
 
-      return {
-        main: [
-          "## Summary",
+  const task = pipr.task({
+    name: "pr-briefing",
+    async run(ctx) {
+      const manifest = await ctx.change.diffManifest({ compressed: true });
+      const result = await ctx.pi.run(briefing, { manifest });
+      const sections = [
+        overviewTable(result, ctx.change.title),
+        "",
+        "## Summary",
+        "",
+        result.summary,
+      ];
+      if (result.changeMap.length > 0) {
+        sections.push("", "## Change Map", "", changeMapTable(result.changeMap));
+      }
+      if (result.reviewerFocus.length > 0) {
+        sections.push(
           "",
-          result.summary.body,
+          "## Reviewer Focus",
           "",
-          "## Review Result",
+          result.reviewerFocus.map((item) => `- ${item}`).join("\n"),
+        );
+      }
+      if (result.notableFiles.length > 0) {
+        sections.push("", "## Notable Files", "", notableFilesTable(result.notableFiles));
+      }
+      if (result.walkthrough.length > 0) {
+        sections.push(
           "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
+          "## Walkthrough",
           "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
-        ].join("\n"),
-        inlineFindings: result.inlineFindings,
-      };
+          result.walkthrough.map((item) => `- ${item}`).join("\n"),
+        );
+      }
+      const diagram = diagramBlock(result.diagramMermaid);
+      if (diagram) {
+        sections.push("", diagram);
+      }
+      await ctx.comment(sections.join("\n"));
     },
   });
+
+  pipr.on.changeRequest({ actions: ["opened", "updated", "reopened", "ready"], task });
+  pipr.command({
+    pattern: "@pipr describe",
+    permission: "read",
+    description: "Generate a reviewer briefing for this change request.",
+    task,
+  });
 });
+
+function overviewTable(briefing: Briefing, title: string): string {
+  const titleCell = title.replaceAll("\n", " ").replaceAll("|", "\\|");
+  const prType = briefing.prType.replaceAll("-", " ").replace(/^./, (char) => char.toUpperCase());
+  const riskLevel = briefing.riskLevel
+    .replaceAll("-", " ")
+    .replace(/^./, (char) => char.toUpperCase());
+  const riskSummary = briefing.riskSummary.replaceAll("\n", " ").replaceAll("|", "\\|");
+  return [
+    "| Change | Type | Risk | Risk summary |",
+    "| --- | --- | --- | --- |",
+    `| ${titleCell} | ${prType} | ${riskLevel} | ${riskSummary} |`,
+  ].join("\n");
+}
+
+function changeMapTable(changeMap: Briefing["changeMap"]): string {
+  if (changeMap.length === 0) {
+    return [
+      "| Area | Files | Change |",
+      "| --- | --- | --- |",
+      "| - | - | No changed areas summarized. |",
+    ].join("\n");
+  }
+  return [
+    "| Area | Files | Change |",
+    "| --- | --- | --- |",
+    ...changeMap.map((item) => {
+      const area = item.area.replaceAll("\n", " ").replaceAll("|", "\\|");
+      const files = item.files.join("<br>").replaceAll("\n", " ").replaceAll("|", "\\|");
+      const change = item.change.replaceAll("\n", " ").replaceAll("|", "\\|");
+      return `| ${area} | ${files} | ${change} |`;
+    }),
+  ].join("\n");
+}
+
+function notableFilesTable(files: Briefing["notableFiles"]): string {
+  if (files.length === 0) {
+    return [
+      "| File | Why it matters |",
+      "| --- | --- |",
+      "| - | No notable files called out. |",
+    ].join("\n");
+  }
+  return [
+    "| File | Why it matters |",
+    "| --- | --- |",
+    ...files.map((file) => {
+      const filePath = file.path.replaceAll("\n", " ").replaceAll("|", "\\|");
+      const reason = file.reason.replaceAll("\n", " ").replaceAll("|", "\\|");
+      return `| ${filePath} | ${reason} |`;
+    }),
+  ].join("\n");
+}
+
+function diagramBlock(diagramMermaid: string | undefined): string {
+  const diagram = diagramMermaid?.trim();
+  if (!diagram) {
+    return "";
+  }
+  const fence = markdownFenceFor(diagram);
+  return [
+    "<details>",
+    "<summary>Flow diagram</summary>",
+    "",
+    `${fence}mermaid`,
+    diagram,
+    fence,
+    "",
+    "</details>",
+  ].join("\n");
+}
+
+function markdownFenceFor(value: string): string {
+  const longestBacktickRun = Math.max(
+    0,
+    ...[...value.matchAll(/`+/g)].map((match) => match[0].length),
+  );
+  return "`".repeat(Math.max(3, longestBacktickRun + 1));
+}
