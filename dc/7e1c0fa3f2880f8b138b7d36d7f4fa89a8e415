@@ -1,0 +1,23 @@
+.gitlab-ci.yml
+  s_20e6f7049d0fc8::t_118eefd19520f2 1-11
+azure-devops.pipr.env.example
+  s_20e6f7049d0fc8::t_fa60847e004f42 1-6
+bitbucket.pipr.env.example
+  s_20e6f7049d0fc8::t_34673618ff429a 1-8
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "dc7e1c0fa3f2880f8b138b7d36d7f4fa89a8e415",
+  "prompts": {},
+  "sessions": {
+    "s_20e6f7049d0fc8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f63-2f6f-7e83-84c0-27acc706cb5b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Somasundaram Ayyappan <1802828+somus@users.noreply.github.com>"
+    }
+  }
+}
