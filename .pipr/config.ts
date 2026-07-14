@@ -8,47 +8,40 @@ export default definePipr((pipr) => {
     options: { thinking: "high" },
   });
 
-  pipr.config({ publication: { maxInlineComments: 5 } });
-
-  pipr.review({
-    id: "review",
+  const askAgent = pipr.agent({
+    name: "interactive-ask",
     model,
     instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
+      Answer the reviewer question directly using the current diff, repository,
+      and prior Pipr findings. Cite relevant paths or symbols when available.
+      Distinguish evidence from inference. When external systems or hidden state
+      are required, state precisely which missing context prevents an answer.
     `,
-    timeout: "10m",
-    comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+    output: pipr.schemas.summary,
+    prompt: (input: { question: string; manifest: unknown; prior: unknown }) => pipr.prompt`
+      ${pipr.section("Question", input.question)}
+      ${pipr.section("Prior pipr review", pipr.json(input.prior, { maxCharacters: 20000 }))}
+    `,
+  });
 
-      return {
-        main: [
-          "## Summary",
-          "",
-          result.summary.body,
-          "",
-          "## Review Result",
-          "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
-          "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
-        ].join("\n"),
-        inlineFindings: result.inlineFindings,
-      };
+  const task = pipr.task<{ question: string }>({
+    name: "interactive-ask",
+    async run(ctx, input) {
+      if (!ctx.command) {
+        throw new Error("interactive-ask is a command-only task");
+      }
+      const manifest = await ctx.change.diffManifest({ compressed: true });
+      const prior = await ctx.review.prior();
+      const answer = await ctx.pi.run(askAgent, { question: input.question, manifest, prior });
+      await ctx.command.reply(answer.body);
     },
+  });
+
+  pipr.command({
+    pattern: "@pipr ask <question...>",
+    permission: "read",
+    description: "Ask a question about this change request.",
+    parse: (args) => ({ question: args.question ?? "" }),
+    task,
   });
 });
