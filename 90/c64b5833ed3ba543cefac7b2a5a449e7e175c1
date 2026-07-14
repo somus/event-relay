@@ -1,0 +1,19 @@
+src/delivery.ts
+  s_20e6f7049d0fc8::t_8f07200ddfa3e0 25-28
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.13",
+  "base_commit_sha": "90c64b5833ed3ba543cefac7b2a5a449e7e175c1",
+  "prompts": {},
+  "sessions": {
+    "s_20e6f7049d0fc8": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f5f63-2f6f-7e83-84c0-27acc706cb5b",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Somasundaram Ayyappan <1802828+somus@users.noreply.github.com>"
+    }
+  }
+}
