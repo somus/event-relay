@@ -1,4 +1,4 @@
-import { definePipr } from "@usepipr/sdk";
+import { definePipr, z } from "@usepipr/sdk";
 
 export default definePipr((pipr) => {
   const model = pipr.model({
@@ -8,47 +8,83 @@ export default definePipr((pipr) => {
     options: { thinking: "high" },
   });
 
-  pipr.config({ publication: { maxInlineComments: 5 } });
+  const dependencyOutput = pipr.schema({
+    id: "dependency/risk-summary",
+    schema: z.strictObject({
+      summary: z.string(),
+      risks: z.array(z.string()).max(6),
+      followUps: z.array(z.string()).max(6),
+    }),
+  });
 
-  pipr.review({
-    id: "review",
+  const dependencyReviewer = pipr.agent({
+    name: "dependency-risk",
     model,
     instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
+      Review dependency manifest and lockfile changes. Distinguish direct from
+      transitive changes, runtime from development scope, and manifest intent
+      from generated lockfile churn. Check manifest-lock consistency. Flag
+      evidenced breaking upgrades, suspicious additions, install script risk,
+      lockfile drift, and required migration work. Do not make external release,
+      compatibility, or CVE claims that are not evidenced in the change.
     `,
-    timeout: "10m",
-    comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+    output: dependencyOutput,
+    prompt: () => "Review the dependency-related changes in this change request.",
+  });
 
-      return {
-        main: [
-          "## Summary",
-          "",
-          result.summary.body,
-          "",
-          "## Review Result",
-          "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
-          "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
-        ].join("\n"),
-        inlineFindings: result.inlineFindings,
+  const task = pipr.task({
+    name: "dependency-risk",
+    async run(ctx) {
+      const paths = {
+        include: [
+          "**/package.json",
+          "**/bun.lock",
+          "**/package-lock.json",
+          "**/pnpm-lock.yaml",
+          "**/yarn.lock",
+          "**/requirements*.txt",
+          "**/pyproject.toml",
+          "**/deno.json",
+          "**/deno.jsonc",
+          "**/jsr.json",
+          "**/uv.lock",
+          "**/poetry.lock",
+          "**/Pipfile",
+          "**/Pipfile.lock",
+          "**/Gemfile",
+          "**/Gemfile.lock",
+          "**/composer.json",
+          "**/composer.lock",
+          "**/Package.swift",
+          "**/Package.resolved",
+          "**/Directory.Packages.props",
+          "**/packages.lock.json",
+          "**/Cargo.toml",
+          "**/Cargo.lock",
+          "**/go.mod",
+          "**/go.sum",
+        ],
       };
+      const manifest = await ctx.change.diffManifest({ compressed: true, paths });
+      if (manifest.files.length === 0) {
+        await ctx.comment("No dependency files changed.");
+        return;
+      }
+      const result = await ctx.pi.run(dependencyReviewer, { manifest }, { paths });
+      await ctx.comment(
+        [
+          result.summary,
+          "",
+          "## Risks",
+          ...result.risks.map((risk) => `- ${risk}`),
+          "",
+          "## Follow-ups",
+          ...result.followUps.map((followUp) => `- ${followUp}`),
+        ].join("\n"),
+      );
     },
   });
+
+  pipr.on.changeRequest({ actions: ["opened", "updated"], task });
+  pipr.command({ pattern: "@pipr dependency-risk", permission: "write", task });
 });
