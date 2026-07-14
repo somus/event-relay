@@ -44,13 +44,13 @@ export async function deliverWebhook(
 
   const wait = retry.wait ?? ((delayMs) => Bun.sleep(delayMs));
 
-  for (let attempt = 1; attempt < retry.maxAttempts; attempt += 1) {
+  for (let attempt = 1; attempt <= retry.maxAttempts; attempt += 1) {
     try {
       await client.post(delivery.destination, delivery.body);
       await ledger.markCompleted(delivery.id);
       return "delivered";
     } catch (error) {
-      const retryable = error instanceof HttpDeliveryError && error.status >= 500;
+      const retryable = error instanceof HttpDeliveryError && error.status >= 400;
       if (!retryable || attempt === retry.maxAttempts) {
         throw error;
       }
