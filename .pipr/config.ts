@@ -1,4 +1,5 @@
-import { definePipr } from "@usepipr/sdk";
+import { definePipr, z } from "@usepipr/sdk";
+import type { ReviewFinding } from "@usepipr/sdk";
 
 export default definePipr((pipr) => {
   const model = pipr.model({
@@ -8,47 +9,55 @@ export default definePipr((pipr) => {
     options: { thinking: "high" },
   });
 
-  pipr.config({ publication: { maxInlineComments: 5 } });
+  const diagnosticOutput = pipr.schema({
+    id: "diagnostics/reviewdog-style",
+    schema: z.strictObject({
+      summary: z.string(),
+      diagnostics: z.array(z.strictObject({
+        body: z.string(),
+        path: z.string(),
+        rangeId: z.string(),
+        side: z.enum(["RIGHT", "LEFT"]),
+        startLine: z.number().int().positive(),
+        endLine: z.number().int().positive(),
+        suggestedFix: z.string().optional(),
+      })),
+    }),
+  });
 
-  pipr.review({
-    id: "review",
+  const diagnostics = pipr.agent({
+    name: "diff-diagnostics",
     model,
     instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
+      Produce short compiler-style diagnostics for actionable defects only.
+      State the concrete defect and impact in at most two sentences. Suppress
+      style preferences, broad refactors, and diagnostics without exact changed-line anchors.
     `,
-    timeout: "10m",
-    comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+    output: diagnosticOutput,
+    prompt: () => "Summarize the diff-scoped diagnostics for this change.",
+  });
 
-      return {
-        main: [
-          "## Summary",
-          "",
-          result.summary.body,
-          "",
-          "## Review Result",
-          "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
-          "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
-        ].join("\n"),
-        inlineFindings: result.inlineFindings,
-      };
+  const task = pipr.task({
+    name: "diff-diagnostics",
+    async run(ctx) {
+      const manifest = await ctx.change.diffManifest({ compressed: true });
+      const result = await ctx.pi.run(diagnostics, { manifest });
+      const inlineFindings: ReviewFinding[] = result.diagnostics.map((diagnostic) => ({
+        body: diagnostic.body,
+        path: diagnostic.path,
+        rangeId: diagnostic.rangeId,
+        side: diagnostic.side,
+        startLine: diagnostic.startLine,
+        endLine: diagnostic.endLine,
+        ...(diagnostic.suggestedFix ? { suggestedFix: diagnostic.suggestedFix } : {}),
+      }));
+      await ctx.comment({
+        main: result.summary,
+        inlineFindings,
+      });
     },
   });
+
+  pipr.on.changeRequest({ actions: ["opened", "updated"], task });
+  pipr.command({ pattern: "@pipr diagnostics", permission: "write", task });
 });
