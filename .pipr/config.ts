@@ -1,4 +1,43 @@
-import { definePipr } from "@usepipr/sdk";
+import { definePipr, z } from "@usepipr/sdk";
+import type { ReviewFinding } from "@usepipr/sdk";
+
+type ReviewSummary = {
+  headline: string;
+  changeSummary: string[];
+  riskLevel: "low" | "medium" | "high";
+  riskSummary: string;
+  reviewerFocus: string[];
+};
+
+const categorizedFindingSchema = z.strictObject({
+  title: z.string(),
+  severity: z.enum(["critical", "high", "medium", "low"]),
+  category: z.enum([
+    "correctness",
+    "security",
+    "reliability",
+    "performance",
+    "test-coverage",
+    "maintainability",
+    "documentation",
+  ]),
+  rationale: z.string(),
+  body: z.string(),
+  path: z.string(),
+  rangeId: z.string(),
+  side: z.enum(["RIGHT", "LEFT"]),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  suggestedFix: z.string().optional(),
+});
+
+const reviewSummarySchema = z.strictObject({
+  headline: z.string(),
+  changeSummary: z.array(z.string()).min(1).max(4),
+  riskLevel: z.enum(["low", "medium", "high"]),
+  riskSummary: z.string(),
+  reviewerFocus: z.array(z.string()).max(4),
+});
 
 export default definePipr((pipr) => {
   const model = pipr.model({
@@ -8,47 +47,109 @@ export default definePipr((pipr) => {
     options: { thinking: "high" },
   });
 
-  pipr.config({ publication: { maxInlineComments: 5 } });
+  pipr.config({ publication: { maxInlineComments: 8 } });
 
-  pipr.review({
-    id: "review",
+  const reviewOutput = pipr.schema({
+    id: "review/categorized-findings",
+    schema: z.strictObject({
+      summary: reviewSummarySchema,
+      findings: z.array(categorizedFindingSchema),
+    }),
+  });
+
+  const reviewer = pipr.agent({
+    name: "reviewer",
     model,
     instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
-    `,
-    timeout: "10m",
-    comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+      Review the change request diff for correctness, security, reliability,
+      performance, test coverage, maintainability, and documentation risks.
+      Return only actionable findings that target valid diff ranges. Assign
+      severity by merge impact: critical for exploitable, data-loss, or widespread
+      outage risks; high for other merge-blocking defects; medium for concrete
+      non-blocking defects; and low for small but actionable issues. Each rationale
+      must connect repository evidence to the defect and its concrete impact.
 
-      return {
+      Make summary maintainer-facing and scannable: one concrete headline, one
+      to four behavior-focused change bullets, a risk level with rationale, and
+      reviewer focus only for useful human follow-up. Put actionable defects in
+      findings, not only in summary.
+    `,
+    output: reviewOutput,
+    tools: pipr.tools.readOnly,
+    retry: { invalidOutput: 1, transientFailure: 1 },
+    timeout: "10m",
+    prompt: () => "Review this change with severity and category metadata.",
+  });
+
+  const task = pipr.task({
+    name: "review",
+    async run(ctx) {
+      const manifest = await ctx.change.diffManifest({ compressed: true });
+      const result = await ctx.pi.run(reviewer, { manifest });
+      const inlineFindings: ReviewFinding[] = result.findings.map((finding) => {
+        const severity = finding.severity.charAt(0).toUpperCase() + finding.severity.slice(1);
+        const category = finding.category.replaceAll("-", " ");
+        return {
+          body: `**${severity} ${category}:** ${finding.title}. ${finding.body} ${finding.rationale}`,
+          path: finding.path,
+          rangeId: finding.rangeId,
+          side: finding.side,
+          startLine: finding.startLine,
+          endLine: finding.endLine,
+          ...(finding.suggestedFix ? { suggestedFix: finding.suggestedFix } : {}),
+        };
+      });
+      await ctx.comment({
         main: [
           "## Summary",
           "",
-          result.summary.body,
+          `**${result.summary.headline}**`,
           "",
-          "## Review Result",
+          summaryTable(result.summary),
           "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
+          "## What Changed",
           "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
+          bulletList(result.summary.changeSummary, "No changed behavior summarized."),
+          "",
+          "## Reviewer Focus",
+          "",
+          bulletList(result.summary.reviewerFocus, "No special reviewer focus."),
+          "",
         ].join("\n"),
-        inlineFindings: result.inlineFindings,
-      };
+        inlineFindings,
+      });
     },
   });
+
+  pipr.on.changeRequest({ actions: ["opened", "updated", "reopened", "ready"], task });
+  pipr.command({ pattern: "@pipr review", permission: "write", task });
 });
+
+function summaryTable(summary: ReviewSummary): string {
+  return [
+    "| Risk | Risk summary |",
+    "| --- | --- |",
+    `| ${labelValue(summary.riskLevel)} | ${tableCell(
+      summary.riskSummary,
+    )} |`,
+  ].join("\n");
+}
+
+function bulletList(items: string[], emptyText: string): string {
+  if (items.length === 0) {
+    return emptyText;
+  }
+  return items.map((item) => `- ${lineText(item)}`).join("\n");
+}
+
+function labelValue(value: string): string {
+  return value.replaceAll("-", " ").replace(/^./, (char) => char.toUpperCase());
+}
+
+function lineText(value: string): string {
+  return value.replaceAll("\n", " ").trim();
+}
+
+function tableCell(value: string): string {
+  return lineText(value).replaceAll("|", "\\|");
+}
