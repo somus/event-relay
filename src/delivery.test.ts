@@ -8,11 +8,11 @@ import {
 
 describe("deliverWebhook", () => {
   test("delivers a new event and records completion", async () => {
-    const calls: string[] = [];
+    const calls: Array<{ body: string; headers: Record<string, string> }> = [];
     const completed = new Set<string>();
     const client: WebhookClient = {
-      post: async (_destination, body) => {
-        calls.push(body);
+      post: async (_destination, body, headers) => {
+        calls.push({ body, headers });
       },
     };
     const ledger: DeliveryLedger = {
@@ -23,13 +23,23 @@ describe("deliverWebhook", () => {
     };
 
     const result = await deliverWebhook(
-      { id: "evt_7d3", destination: "https://hooks.example.test/orders", body: "order.created" },
+      {
+        id: "evt_7d3",
+        eventType: "order.created",
+        destination: "https://hooks.example.test/orders",
+        body: "order.created",
+      },
       client,
       ledger,
     );
 
     expect(result).toBe("delivered");
-    expect(calls).toEqual(["order.created"]);
+    expect(calls).toEqual([
+      {
+        body: "order.created",
+        headers: { "X-Event-Id": "evt_7d3", "X-Event-Type": "order.created" },
+      },
+    ]);
     expect(completed.has("evt_7d3")).toBe(true);
   });
 
@@ -46,7 +56,12 @@ describe("deliverWebhook", () => {
 
     await expect(
       deliverWebhook(
-        { id: "evt_done", destination: "https://hooks.example.test/orders", body: "order.updated" },
+        {
+          id: "evt_done",
+          eventType: "order.updated",
+          destination: "https://hooks.example.test/orders",
+          body: "order.updated",
+        },
         client,
         ledger,
       ),

@@ -1,5 +1,6 @@
 export interface Delivery {
   id: string;
+  eventType: string;
   destination: string;
   body: string;
 }
@@ -10,7 +11,7 @@ export interface DeliveryLedger {
 }
 
 export interface WebhookClient {
-  post(destination: string, body: string): Promise<void>;
+  post(destination: string, body: string, headers: Record<string, string>): Promise<void>;
 }
 
 export async function deliverWebhook(
@@ -22,7 +23,10 @@ export async function deliverWebhook(
     return "already-delivered";
   }
 
-  await client.post(delivery.destination, delivery.body);
+  await client.post(delivery.destination, delivery.body, {
+    "X-Event-Id": delivery.id,
+    "X-Event-Type": delivery.eventType,
+  });
   await ledger.markCompleted(delivery.id);
   return "delivered";
 }
