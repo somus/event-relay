@@ -1,22 +1,55 @@
 import { S3Client } from "bun";
 import { definePlugin, type SecretRef, type TaskContext, z } from "@usepipr/sdk";
 
+export const memoryLimits = {
+  subjectCharacters: 120,
+  bodyCharacters: 4000,
+  tagCount: 12,
+  tagCharacters: 50,
+  queryCharacters: 500,
+  resultDefault: 5,
+  resultMinimum: 1,
+  resultMaximum: 20,
+  searchObjectMaximum: 2000,
+} as const;
+
+const memorySource = z.strictObject({
+  kind: z.enum(["maintainer-command", "agent-tool"]),
+  runId: z.string().min(1).max(200),
+  platform: z.string().min(1).max(50),
+  changeRequestNumber: z.number().int().nonnegative().optional(),
+  headSha: z.string().min(1).max(200),
+});
+
 const memoryItem = z.strictObject({
-  subject: z.string(),
-  body: z.string(),
-  tags: z.array(z.string()).optional(),
-  updatedAt: z.string().optional(),
+  id: z.string().uuid().optional(),
+  subject: z.string().trim().min(1).max(memoryLimits.subjectCharacters),
+  body: z.string().trim().min(1).max(memoryLimits.bodyCharacters),
+  tags: z
+    .array(z.string().trim().min(1).max(memoryLimits.tagCharacters))
+    .max(memoryLimits.tagCount)
+    .optional(),
+  source: memorySource.optional(),
+  updatedAt: z.string().max(50).optional(),
 });
 
 const memorySearchInput = z.strictObject({
-  query: z.string(),
-  limit: z.number().optional(),
+  query: z.string().trim().min(1).max(memoryLimits.queryCharacters),
+  limit: z
+    .number()
+    .int()
+    .min(memoryLimits.resultMinimum)
+    .max(memoryLimits.resultMaximum)
+    .optional(),
 });
 
 const memoryStoreInput = z.strictObject({
-  subject: z.string(),
-  body: z.string(),
-  tags: z.array(z.string()).optional(),
+  subject: z.string().trim().min(1).max(memoryLimits.subjectCharacters),
+  body: z.string().trim().min(1).max(memoryLimits.bodyCharacters),
+  tags: z
+    .array(z.string().trim().min(1).max(memoryLimits.tagCharacters))
+    .max(memoryLimits.tagCount)
+    .optional(),
 });
 
 type MemoryItem = ReturnType<typeof memoryItem.parse>;
@@ -43,6 +76,7 @@ export function r2MemoryPlugin(options: R2MemoryOptions) {
       id: "memory/search-output",
       schema: z.strictObject({
         memories: z.array(memoryItem),
+        skippedObjects: z.number().int().nonnegative(),
       }),
     });
     const storeInput = pipr.schema({
@@ -54,6 +88,7 @@ export function r2MemoryPlugin(options: R2MemoryOptions) {
       schema: z.strictObject({
         stored: z.boolean(),
         key: z.string(),
+        id: z.string().uuid(),
       }),
     });
 
@@ -76,12 +111,15 @@ export function r2MemoryPlugin(options: R2MemoryOptions) {
         input: storeInput,
         output: storeOutput,
         async run({ input, ctx, signal }) {
-          return await storeMemory(input, ctx, options, signal);
+          return await storeMemory(input, ctx, options, "agent-tool", signal);
         },
         toModelOutput(output) {
           return output;
         },
       }),
+      curate(input: MemoryStoreInput, ctx: TaskContext, signal?: AbortSignal) {
+        return storeMemory(input, ctx, options, "maintainer-command", signal);
+      },
     };
   });
 }
@@ -91,29 +129,52 @@ async function searchMemory(
   ctx: TaskContext,
   options: R2MemoryOptions,
   signal?: AbortSignal,
-): Promise<{ memories: MemoryItem[] }> {
+): Promise<{ memories: MemoryItem[]; skippedObjects: number }> {
   signal?.throwIfAborted();
   const bucket = r2Bucket(ctx, options);
-  const listed = await bucket.list({ prefix: memoryPrefix(ctx, options) + "/", maxKeys: 200 });
   const memories: MemoryItem[] = [];
+  let continuationToken: string | undefined;
+  let scannedObjects = 0;
+  let skippedObjects = 0;
 
-  for (const object of listed.contents ?? []) {
+  do {
     signal?.throwIfAborted();
-    try {
-      const value = memoryItem.parse(await bucket.file(object.key).json());
-      if (matchesMemory(value, input.query)) {
-        memories.push(value);
-      }
-    } catch {
-      // Ignore malformed or concurrently deleted memory objects.
-    }
-  }
+    const listed = await bucket.list({
+      prefix: memoryPrefix(ctx, options) + "/",
+      maxKeys: 200,
+      continuationToken,
+    });
 
-  const limit = Math.min(Math.max(Math.trunc(input.limit ?? 5), 1), 20);
+    const objects = (listed.contents ?? []).slice(
+      0,
+      memoryLimits.searchObjectMaximum - scannedObjects,
+    );
+    scannedObjects += objects.length;
+    for (const object of objects) {
+      signal?.throwIfAborted();
+      try {
+        const value = memoryItem.parse(await bucket.file(object.key).json());
+        if (matchesMemory(value, input.query)) {
+          memories.push(value);
+        }
+      } catch {
+        // Exclude malformed or concurrently deleted objects and report the count.
+        skippedObjects += 1;
+      }
+    }
+
+    continuationToken = listed.isTruncated ? listed.nextContinuationToken : undefined;
+  } while (continuationToken && scannedObjects < memoryLimits.searchObjectMaximum);
+
+  const limit = Math.min(
+    Math.max(Math.trunc(input.limit ?? memoryLimits.resultDefault), memoryLimits.resultMinimum),
+    memoryLimits.resultMaximum,
+  );
   return {
     memories: memories
       .sort((left, right) => (right.updatedAt ?? "").localeCompare(left.updatedAt ?? ""))
       .slice(0, limit),
+    skippedObjects,
   };
 }
 
@@ -121,14 +182,53 @@ async function storeMemory(
   input: MemoryStoreInput,
   ctx: TaskContext,
   options: R2MemoryOptions,
+  sourceKind: "maintainer-command" | "agent-tool",
   signal?: AbortSignal,
-): Promise<{ stored: boolean; key: string }> {
+): Promise<{ stored: boolean; key: string; id: string }> {
   signal?.throwIfAborted();
   const bucket = r2Bucket(ctx, options);
-  const entry: MemoryItem = { ...input, updatedAt: new Date().toISOString() };
-  const key = memoryKey(input.subject, ctx, options);
+  const parsedInput = memoryStoreInput.parse(input);
+  const curatedKey =
+    sourceKind === "maintainer-command"
+      ? memoryPrefix(ctx, options) +
+        "/maintainer-command/" +
+        encodeURIComponent(ctx.run.id) +
+        ".json"
+      : undefined;
+
+  const id = curatedKey ? await stableCommandMemoryId(ctx.run.id) : crypto.randomUUID();
+  const entry = memoryItem.parse({
+    ...parsedInput,
+    id,
+    source: {
+      kind: sourceKind,
+      runId: ctx.run.id,
+      platform: ctx.platform.id,
+      changeRequestNumber: ctx.change.number,
+      headSha: ctx.change.head.sha,
+    },
+    updatedAt: new Date().toISOString(),
+  });
+  const key = curatedKey ?? memoryKey(id, parsedInput.subject, ctx, options);
   await bucket.write(key, JSON.stringify(entry, null, 2), { type: "application/json" });
-  return { stored: true, key };
+  return { stored: true, key, id };
+}
+
+async function stableCommandMemoryId(runId: string): Promise<string> {
+  const digest = new Uint8Array(
+    await crypto.subtle.digest(
+      "SHA-256",
+      new TextEncoder().encode("pipr-memory/maintainer-command/" + runId),
+    ),
+  );
+  digest[6] = (digest[6]! & 0x0f) | 0x50;
+  digest[8] = (digest[8]! & 0x3f) | 0x80;
+  const hex = Array.from(digest.slice(0, 16), (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20)].join(
+    "-",
+  );
 }
 
 function r2Bucket(ctx: TaskContext, options: R2MemoryOptions): S3Client {
@@ -159,14 +259,26 @@ function cleanPathSegment(value: string): string {
   );
 }
 
-function memoryKey(subject: string, ctx: TaskContext, options: R2MemoryOptions): string {
+function memoryKey(
+  id: string,
+  subject: string,
+  ctx: TaskContext,
+  options: R2MemoryOptions,
+): string {
   const slug = subject
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-|-$/g, "")
     .slice(0, 60);
   return (
-    memoryPrefix(ctx, options) + "/" + new Date().toISOString() + "-" + (slug || "memory") + ".json"
+    memoryPrefix(ctx, options) +
+    "/" +
+    new Date().toISOString() +
+    "-" +
+    id +
+    "-" +
+    (slug || "memory") +
+    ".json"
   );
 }
 
