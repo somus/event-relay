@@ -6,7 +6,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   const diagnosticOutput = pipr.schema({
@@ -52,7 +52,7 @@ export default definePipr((pipr) => {
         ...(diagnostic.suggestedFix ? { suggestedFix: diagnostic.suggestedFix } : {}),
       }));
       await ctx.comment({
-        main: result.summary,
+        main: ["## 🧭 Summary", "", result.summary].join("\n"),
         inlineFindings,
       });
     },
