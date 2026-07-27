@@ -5,7 +5,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   pipr.config({ publication: { maxInlineComments: 5 } });
@@ -13,40 +13,34 @@ export default definePipr((pipr) => {
   pipr.review({
     id: "review",
     model,
-    instructions: `
-      Review changed behavior for correctness, security, maintainability, and
-      meaningful regression gaps. Focus on concrete impact and compatibility
-      with repository contracts. Return only actionable findings that target
-      valid diff ranges.
-    `,
+    instructions: {
+      findings: `
+        Review changed behavior for correctness, security, maintainability, and
+        meaningful regression gaps. Focus on concrete impact and compatibility
+        with repository contracts. Return only actionable findings that target
+        valid diff ranges.
+      `,
+      summary: `
+        Summarize the changed behavior, overall risk, and useful reviewer focus.
+        Use merged findings as evidence without introducing new defects.
+      `,
+    },
     timeout: "10m",
     comment: (result, context) => {
-      const inlineFindingSummary =
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : "See inline comments in the diff.";
-      const localInlineFindingSummary = [
-        "## Inline Findings",
-        "",
-        result.inlineFindings.length === 0
-          ? "No inline findings."
-          : result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n"),
-      ].join("\n");
+      const sections = ["## 🧭 Summary", "", result.summary.body];
+      if (result.inlineFindings.length > 0) {
+        sections.push(
+          "",
+          "## ⚠️ Findings",
+          "",
+          context.run.trigger === "local"
+            ? result.inlineFindings.map((finding) => `- ${finding.body}`).join("\n")
+            : "See inline comments in the diff.",
+        );
+      }
 
       return {
-        main: [
-          "## Summary",
-          "",
-          result.summary.body,
-          "",
-          "## Review Result",
-          "",
-          "| Signal | Result |",
-          "| --- | ---: |",
-          `| Inline findings | ${result.inlineFindings.length} |`,
-          "",
-          context.platform.id === "local" ? localInlineFindingSummary : inlineFindingSummary,
-        ].join("\n"),
+        main: sections.join("\n"),
         inlineFindings: result.inlineFindings,
       };
     },
