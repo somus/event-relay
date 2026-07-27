@@ -6,7 +6,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   const fast = pipr.model({
@@ -14,7 +14,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "medium" },
+    thinking: "medium",
   });
 
   const specialistPrompt = (input: { manifest: unknown; focus: string }) => pipr.prompt`
@@ -90,7 +90,7 @@ export default definePipr((pipr) => {
       });
       ctx.check.pass("Multi-agent review completed.");
       await ctx.comment({
-        main: result.summary.body,
+        main: ["## 🧭 Summary", "", result.summary.body].join("\n"),
         inlineFindings: result.inlineFindings,
       });
     },
