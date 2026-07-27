@@ -10,5 +10,8 @@
   "devDependencies": {
     "@types/bun": "1.3.14",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "p-retry": "8.0.0"
   }
 }
