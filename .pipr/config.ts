@@ -5,7 +5,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   const askAgent = pipr.agent({
@@ -33,7 +33,7 @@ export default definePipr((pipr) => {
       const manifest = await ctx.change.diffManifest({ compressed: true });
       const prior = await ctx.review.prior();
       const answer = await ctx.pi.run(askAgent, { question: input.question, manifest, prior });
-      await ctx.command.reply(answer.body);
+      await ctx.command.reply(["## ℹ️ Answer", "", answer.body].join("\n"));
     },
   });
 
