@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 
 import {
   deliverWebhook,
+  HttpDeliveryError,
   type DeliveryLedger,
   type WebhookClient,
 } from "./delivery";
@@ -51,5 +52,61 @@ describe("deliverWebhook", () => {
         ledger,
       ),
     ).resolves.toBe("already-delivered");
+  });
+
+  test("retries a transient upstream failure with exponential backoff", async () => {
+    const attempts: string[] = [];
+    const delays: number[] = [];
+    const client: WebhookClient = {
+      post: async (_destination, body) => {
+        attempts.push(body);
+        if (attempts.length === 1) {
+          throw new HttpDeliveryError("upstream unavailable", 503);
+        }
+      },
+    };
+    const ledger: DeliveryLedger = {
+      hasCompleted: async () => false,
+      markCompleted: async () => undefined,
+    };
+
+    await expect(
+      deliverWebhook(
+        { id: "evt_retry", destination: "https://hooks.example.test/orders", body: "order.paid" },
+        client,
+        ledger,
+        {
+          maxAttempts: 3,
+          initialDelayMs: 100,
+          wait: async (delay) => {
+            delays.push(delay);
+          },
+        },
+      ),
+    ).resolves.toBe("delivered");
+
+    expect(attempts).toEqual(["order.paid", "order.paid"]);
+    expect(delays).toEqual([100]);
+  });
+
+  test("does not retry a permanent client error", async () => {
+    const client: WebhookClient = {
+      post: async () => {
+        throw new HttpDeliveryError("signature rejected", 401);
+      },
+    };
+    const ledger: DeliveryLedger = {
+      hasCompleted: async () => false,
+      markCompleted: async () => undefined,
+    };
+
+    await expect(
+      deliverWebhook(
+        { id: "evt_auth", destination: "https://hooks.example.test/orders", body: "order.refunded" },
+        client,
+        ledger,
+        { maxAttempts: 3, initialDelayMs: 100, wait: async () => undefined },
+      ),
+    ).rejects.toThrow("signature rejected");
   });
 });
