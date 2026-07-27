@@ -1,5 +1,11 @@
 import { definePipr } from "@usepipr/sdk";
 
+function nestedSummary(body: string): string {
+  return body
+    .replace(/^\s*#{1,6}[ \t]+Summary[ \t]*\r?\n+/i, "")
+    .replace(/^#{1,2}[ \t]+/gm, "### ");
+}
+
 export default definePipr((pipr) => {
   const model = pipr.model({
     provider: "deepseek",
@@ -27,7 +33,7 @@ export default definePipr((pipr) => {
     },
     timeout: "10m",
     comment: (result, context) => {
-      const sections = ["## 🧭 Summary", "", result.summary.body];
+      const sections = ["## 🧭 Summary", "", nestedSummary(result.summary.body)];
       if (result.inlineFindings.length > 0) {
         sections.push(
           "",
