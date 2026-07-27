@@ -22,7 +22,10 @@ export async function deliverWebhook(
     return "already-delivered";
   }
 
-  await client.post(delivery.destination, delivery.body);
+  await client.post(
+    delivery.destination,
+    JSON.stringify({ deliveryId: delivery.id, payload: delivery.body }),
+  );
   await ledger.markCompleted(delivery.id);
   return "delivered";
 }
