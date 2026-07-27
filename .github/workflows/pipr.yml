@@ -30,7 +30,7 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ github.token }}
           PIPR_RUN_AGE_RECIPIENTS: ${{ vars.PIPR_RUN_AGE_RECIPIENTS }}
-          PIPR_IMAGE: ghcr.io/somus/pipr@sha256:f78baaca0def4966e1187a42666752a6d7b79e999926489780d99ec60097bfd1
+          PIPR_IMAGE: ghcr.io/somus/pipr@sha256:e457c8a1d06b63ead09f48dcdcd33e5b4d8a0ddd65859e8136af503b37cd944a
         run: |
           touch .pipr-live-output
           docker run --rm \
