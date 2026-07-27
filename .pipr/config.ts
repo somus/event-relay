@@ -6,7 +6,7 @@ export default definePipr((pipr) => {
     provider: "deepseek",
     model: "deepseek-v4-pro",
     apiKey: pipr.secret({ name: "DEEPSEEK_API_KEY" }),
-    options: { thinking: "high" },
+    thinking: "high",
   });
 
   pipr.config({ publication: { maxInlineComments: 6 } });
@@ -120,14 +120,21 @@ export default definePipr((pipr) => {
           suggestedFix: suggestion.suggestedFix,
         };
       });
-      await ctx.comment({
-        main: [
-          suggestionSummary(publishableSuggestions.length),
+      const sections = [
+        "## 🧭 Summary",
+        "",
+        suggestionSummary(publishableSuggestions.length),
+      ];
+      if (publishableSuggestions.length > 0) {
+        sections.push(
           "",
-          "## Exact Suggested Changes",
+          "## 🛠️ Exact Suggested Changes",
           "",
           suggestionsTable(publishableSuggestions),
-        ].join("\n"),
+        );
+      }
+      await ctx.comment({
+        main: sections.join("\n"),
         inlineFindings,
       });
     },
@@ -554,13 +561,6 @@ function environmentAccessKeys(value: string): Set<string> {
 }
 
 function suggestionsTable(suggestions: FixSuggestion[]): string {
-  if (suggestions.length === 0) {
-    return [
-      "| Category | Title |",
-      "| --- | --- |",
-      "| - | No exact suggested fixes found. |",
-    ].join("\n");
-  }
   return [
     "| Category | Title |",
     "| --- | --- |",
