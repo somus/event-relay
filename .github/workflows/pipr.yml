@@ -24,7 +24,7 @@ jobs:
         with:
           path: /home/runner/work/_temp/_github_home/.bun/install/cache
           key: pipr-bun-${{ hashFiles('.pipr/bun.lock') }}
-      - uses: docker://ghcr.io/somus/pipr:pr-128-live-8b626bd7
+      - uses: docker://ghcr.io/somus/pipr:pr-128-live-48ae0708
         with:
           args: host-run --host github --config-dir .pipr
         env:
